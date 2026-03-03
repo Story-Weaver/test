@@ -11,21 +11,21 @@ CPU_COUNT="$3"
 DISK_GB="$4"
 USER_PASSWORD="$5"
 
-BASE_IMAGE="$HOME/Images/jammy.img"
-VM_DISK="$HOME/Images/${VM_NAME}.qcow2"
-CLOUD_INIT_DIR="$HOME/${VM_NAME}-cloudinit"
+BASE_IMAGE="/var/lib/libvirt/images/jammy.img"
+VM_DISK="/var/lib/libvirt/images/${VM_NAME}.qcow2"
+CLOUD_INIT_DIR="/var/lib/libvirt/images/${VM_NAME}-cloudinit"
 SEED_ISO="$CLOUD_INIT_DIR/seed.img"
 
 # --- 1. Создаём диск VM ---
 echo "[1] Создаём диск для VM..."
-qemu-img create -f qcow2 -b "$BASE_IMAGE" "$VM_DISK" "${DISK_GB}G"
+qemu-img create -f qcow2 -b "$BASE_IMAGE" -F qcow2 "$VM_DISK" "${DISK_GB}G"
 
 # --- 2. Подготовка cloud-init ---
 echo "[2] Создаём cloud-init конфиг..."
 mkdir -p "$CLOUD_INIT_DIR"
 
 # Шифруем пароль в hash для cloud-init
-PASSWORD_HASH=$(python3 -c "import crypt; print(crypt.crypt('$USER_PASSWORD', crypt.mksalt(crypt.METHOD_SHA512)))")
+PASSWORD_HASH=$(mkpasswd -m sha-512 "$USER_PASSWORD")
 
 cat > "$CLOUD_INIT_DIR/user-data" <<EOF
 #cloud-config
@@ -71,23 +71,21 @@ sudo virt-install \
   --virt-type kvm \
   --graphics none \
   --import \
-  --network network=default
+  --network network=default \
+  --noautoconsole
 
 # --- 5. Настройка port forwarding на хосте ---
 echo "[4] Настраиваем iptables port forwarding..."
 sleep 5
-VM_IP=$(virsh domifaddr "$VM_NAME" --source agent | grep -oP '(\d{1,3}\.){3}\d{1,3}' | head -n1)
-if [ -z "$VM_IP" ]; then
-    VM_IP="192.168.122.100"
-fi
-
-sudo iptables -t nat -A PREROUTING -p tcp --dport "$SSH_PORT" -j DNAT --to-destination "$VM_IP":22
-sudo iptables -A FORWARD -p tcp -d "$VM_IP" --dport 22 -j ACCEPT
-
-echo "Готово! Пользователь может подключиться через:"
-echo "ssh clouduser@<HOST_IP> -p $SSH_PORT"
-
-echo "Пароль: $USER_PASSWORD"
+for i in {1..20}; do
+   VM_IP=$(sudo virsh net-dhcp-leases default | grep "$VM_NAME" | awk '{print $5}' | cut-d'/' -f1)
+   if [[ -n "$VM_IP" ]]; then
+      echo "IP is $VM_IP"
+      break
+   fi
+   echo "Waiting VM IP..."
+   sleep 5
+done   
 
 
 
@@ -96,14 +94,7 @@ echo "Пароль: $USER_PASSWORD"
 # SSH_PORT: порт на хосте, который хотим пробросить
 
 # Получаем IP виртуалки (если virsh agent работает, иначе оставь статический)
-VM_IP=$(virsh domifaddr "$VM_NAME" --source agent | grep -oP '(\d{1,3}\.){3}\d{1,3}' | head -n1)
-if [ -z "$VM_IP" ]; then
-    echo "[!] Не удалось получить IP через virsh agent, укажи вручную"
-    VM_IP="192.168.122.100"
-fi
 
-# Свободный порт хоста для SSH (уже выбран ранее)
-# SSH_PORT="$SSH_PORT"
 
 NET_NAME="default"
 TMP_XML=$(mktemp /tmp/libvirt-net-XXXX.xml)
@@ -135,3 +126,4 @@ sudo virsh net-autostart $NET_NAME
 
 echo "[6] Готово! Пользователь может подключиться:"
 echo "ssh clouduser@<HOST_IP> -p $SSH_PORT"
+
