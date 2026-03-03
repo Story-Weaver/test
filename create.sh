@@ -86,4 +86,52 @@ sudo iptables -A FORWARD -p tcp -d "$VM_IP" --dport 22 -j ACCEPT
 
 echo "Готово! Пользователь может подключиться через:"
 echo "ssh clouduser@<HOST_IP> -p $SSH_PORT"
+
 echo "Пароль: $USER_PASSWORD"
+
+
+
+# --- 6. Настройка проброса SSH через libvirt NAT ---
+# VM_IP: IP виртуалки
+# SSH_PORT: порт на хосте, который хотим пробросить
+
+# Получаем IP виртуалки (если virsh agent работает, иначе оставь статический)
+VM_IP=$(virsh domifaddr "$VM_NAME" --source agent | grep -oP '(\d{1,3}\.){3}\d{1,3}' | head -n1)
+if [ -z "$VM_IP" ]; then
+    echo "[!] Не удалось получить IP через virsh agent, укажи вручную"
+    VM_IP="192.168.122.100"
+fi
+
+# Свободный порт хоста для SSH (уже выбран ранее)
+# SSH_PORT="$SSH_PORT"
+
+NET_NAME="default"
+TMP_XML=$(mktemp /tmp/libvirt-net-XXXX.xml)
+
+echo "[6] Настройка port forwarding $SSH_PORT → $VM_IP:22 через libvirt NAT..."
+
+# Получаем текущую XML сети
+sudo virsh net-dumpxml $NET_NAME > "$TMP_XML"
+
+# Проверяем, есть ли <forward> уже
+if grep -q "<forward mode='nat'" "$TMP_XML"; then
+    # Вставляем правило <port> после <forward>
+    sudo sed -i "/<forward mode='nat'/a\\
+    <port start='$SSH_PORT' end='$SSH_PORT'/>" "$TMP_XML"
+else
+    # Если forward нет, добавляем полностью
+    sudo sed -i "/<network>/a\\
+  <forward mode='nat'>\\
+    <port start='$SSH_PORT' end='$SSH_PORT'/>\\
+  </forward>" "$TMP_XML"
+fi
+
+# Перезапускаем сеть с новым XML
+sudo virsh net-destroy $NET_NAME
+sudo virsh net-undefine $NET_NAME
+sudo virsh net-define "$TMP_XML"
+sudo virsh net-start $NET_NAME
+sudo virsh net-autostart $NET_NAME
+
+echo "[6] Готово! Пользователь может подключиться:"
+echo "ssh clouduser@<HOST_IP> -p $SSH_PORT"
